@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sphinx-linkchecker"
+version = "0.1.0"
+authors = [
+  { name="Geoffrey Nyaga", email="geoffrey@example.com" },
+]
+description = "A sophisticated link checker for Sphinx documentation"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests",
+    "rich",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/geoffreynyaga/sphinx-linkchecker"
+"Bug Tracker" = "https://github.com/geoffreynyaga/sphinx-linkchecker/issues"
+
+[project.scripts]
+linkcheck = "linkchecker.main:main" # This creates a terminal command 'linkcheck'
