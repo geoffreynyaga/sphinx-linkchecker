@@ -16,7 +16,7 @@ def get_session() -> requests.Session:
     session = getattr(_session_local, "session", None)
     if session is None:
         session = requests.Session()
-        session.headers.update({"User-Agent": "multipass-docs-linkcheck"})
+        session.headers.update({"User-Agent": "sphinx-linkchecker"})
         _session_local.session = session
     return session
 
@@ -97,6 +97,21 @@ def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
         val = 1.0 * (2 ** attempt)
     return min(val, 30.0)
 
+def _is_connection_timeout(exc: requests.RequestException) -> bool:
+    """Detect if exception is a connection timeout (not transient).
+
+    Connection timeouts indicate the host is unreachable/offline.
+    These should fail-fast (no retries), since retrying won't help.
+
+    Args:
+        exc: RequestException to inspect.
+
+    Returns:
+        bool: True if this is a connection timeout.
+    """
+    exc_str = str(exc).lower()
+    return 'connect timeout' in exc_str or ('connection' in exc_str and 'refused' in exc_str)
+
 def check_url(
     url: str,
     timeout: float,
@@ -106,13 +121,14 @@ def check_url(
     """Check a single URL for validity.
 
     Attempts a HEAD request first, falling back to GET if HEAD fails with >= 400 or 405.
-    Implements retries for transient errors and respects rate limiting.
+    Implements retries for HTTP 429/5xx errors but fails fast on connection timeouts.
+    Connection timeouts indicate unreachable hosts and don't benefit from retries.
 
     Args:
         url (str): The absolute URL to check.
         timeout (float): Request timeout in seconds.
         rate_limiter (RateLimiter): The rate limiter instance.
-        max_retries (int): Maximum number of retries for transient errors.
+        max_retries (int): Max retries for HTTP 429/5xx (not for connection timeouts).
 
     Returns:
         Tuple[bool, str, float]: (success_bool, message, elapsed_time).
@@ -141,7 +157,7 @@ def check_url(
             response = session.head(url, allow_redirects=True, timeout=timeout)
             if response.status_code == 405 or response.status_code >= 400:
                 response = session.get(url, allow_redirects=True, timeout=timeout)
-            
+
             elapsed = time.monotonic() - start_time
             if response.status_code >= 400:
                 if _is_retryable_status(response.status_code) and attempt < max_retries:
@@ -155,6 +171,11 @@ def check_url(
                 return False, f"HTTP {response.status_code}{suffix}", elapsed
             return True, f"HTTP {response.status_code}", elapsed
         except requests.RequestException as exc:
+            # Fail fast on connection timeouts—host is unreachable, retries won't help.
+            if _is_connection_timeout(exc):
+                elapsed = time.monotonic() - start_time
+                return False, str(exc).splitlines()[0], elapsed
+            # Other transient errors (read timeout, DNS failure) may benefit from retries.
             if attempt < max_retries:
                 sleep_time = min(1.0 * (2 ** attempt), 30.0)
                 time.sleep(sleep_time)
