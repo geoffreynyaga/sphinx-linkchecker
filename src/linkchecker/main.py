@@ -38,10 +38,10 @@ def parse_args():
     parser.add_argument("--build-dir", default="_build")
     parser.add_argument("--cache-dir", default=".sphinx/linkcheck")
     parser.add_argument("--fails-only", action="store_true")
-    parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--per-host-delay", type=float, default=0.5)
-    parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument("--max-retries", type=int, default=None)
     parser.add_argument("--max-urls", type=int, default=0)
     parser.add_argument("--max-seconds", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=50)
@@ -230,7 +230,13 @@ def main() -> int:
     args = parse_args()
     cache_dir = Path(args.cache_dir)
 
-    ignore_urls, exclude_patterns = load_config(args.conf)
+    ignore_urls, exclude_patterns, config_timeout, config_max_retries = load_config(args.conf)
+    
+    # CLI args take priority over config, which takes priority over hardcoded defaults
+    if args.timeout is None:
+        args.timeout = config_timeout
+    if args.max_retries is None:
+        args.max_retries = config_max_retries
 
     if args.fails_only:
         urls = load_failed(cache_dir)
