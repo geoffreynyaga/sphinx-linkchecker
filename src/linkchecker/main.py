@@ -9,7 +9,7 @@ import argparse
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
@@ -100,15 +100,18 @@ class LinkCheckerRunner:
                 self.db_checked += 1
                 self.db_fail += 1
 
-    def run(self, urls: List[str], url_map: Dict[str, List[Tuple[str, int]]], file_to_urls: Dict[str, List[str]]):
+    def run(self, urls: List[str], url_map: Dict[str, List[Tuple[str, int]]], file_to_urls: Dict[str, List[str]], url_to_files: Dict[str, List[str]]):
         """Execute the link check for the provided URLs.
 
         Processes URLs in parallel and prints a hierarchical tree of results.
+        Uses as_completed() to render files as soon as all their URLs finish,
+        providing responsive UI feedback even when some URLs time out.
 
         Args:
             urls (List[str]): List of unique URLs to check.
             url_map (Dict[str, List[Tuple[str, int]]]): Map of URL to (file, line) locations.
             file_to_urls (Dict[str, List[str]]): Map of file path to list of URLs in that file.
+            url_to_files (Dict[str, List[str]]): Map of URL to list of file paths (reverse mapping).
 
         Returns:
             bool: True if the run was aborted (e.g., timeout), False otherwise.
@@ -139,75 +142,124 @@ class LinkCheckerRunner:
                 f.add_done_callback(self.on_future_done)
                 url_to_future[url] = f
 
+            # Calculate worker timeout: must accommodate all retries plus exponential backoff.
+            # With max_retries=2 and timeout=12s:
+            #   Attempt 1: 12s + backoff(2^0=1s) = 13s
+            #   Attempt 2: 12s + backoff(2^1=2s) = 14s
+            #   Attempt 3: 12s + backoff(2^2=4s) = 16s
+            #   Total: ~43s + rate limiter delays + safety margin
+            worker_timeout = (self.args.timeout * (self.args.max_retries + 1)) + 30
+
             try:
+                # Process results as they complete (not in file order) for responsive UI.
+                # This prevents slow URLs from blocking the entire file's display.
+                # When a file's results are complete, render it immediately.
+                
                 finished_urls: Set[str] = set()
                 checked_globally: Set[str] = set()
+                file_results: Dict[str, Dict[str, Tuple[bool, str, float]]] = {
+                    f: {} for f in file_to_urls.keys()
+                }
+                rendered_files: Set[str] = set()
                 last_dir_parts: List[str] = []
                 
-                for file_path in sorted(file_to_urls.keys()):
-                    parts = file_path.split('/')
-                    dir_parts = parts[:-1]
-                    file_name = parts[-1]
+                # Map each future to its URL for lookup after completion
+                future_to_url = {f: u for u, f in url_to_future.items()}
+                
+                # Process results in completion order, not file order
+                for completed_future in as_completed(url_to_future.values(), timeout=worker_timeout):
+                    url = future_to_url[completed_future]
                     
-                    common_depth = 0
-                    for i in range(min(len(dir_parts), len(last_dir_parts))):
-                        if dir_parts[i] == last_dir_parts[i]:
-                            common_depth += 1
-                        else:
-                            break
+                    # Get result from the completed future
+                    try:
+                        ok, message, elapsed = completed_future.result(timeout=worker_timeout)
+                    except TimeoutError:
+                        ok, message, elapsed = False, "Timeout waiting for worker", 0.0
                     
-                    for i in range(common_depth, len(dir_parts)):
-                        indent = "  " * i
-                        _console.print(f"{indent}[dir]{dir_parts[i]}/[/]")
+                    if url not in finished_urls:
+                        finished_urls.add(url)
+                        self.results[url] = (ok, message)
+                        if not ok:
+                            self.failures[url] = message
                     
-                    last_dir_parts = dir_parts
-                    file_indent = "  " * len(dir_parts)
-                    f_urls = sorted(file_to_urls[file_path])
+                    # Record result for the file(s) this URL belongs to
+                    for file_path in url_to_files.get(url, []):
+                        if file_path in file_results:
+                            file_results[file_path][url] = (ok, message, elapsed)
                     
-                    _console.print(f"{file_indent}[file]{file_name}[/] [status_checking]checking...[/]")
-                    checked_urls_in_file = [u for u in f_urls if u in url_to_future]
-                    f_total = len(checked_urls_in_file)
-                    f_ok = 0
-                    
-                    for i, u in enumerate(checked_urls_in_file):
-                        f = url_to_future[u]
-                        try:
-                            ok, message, elapsed = f.result(timeout=self.args.timeout + 10)
-                        except TimeoutError:
-                            ok, message, elapsed = False, "Timeout waiting for worker", 0.0
-
-                        if ok: f_ok += 1
-                        if u not in finished_urls:
-                            finished_urls.add(u)
-                            self.results[u] = (ok, message)
-                            if not ok: self.failures[u] = message
+                    # Check if any complete files are ready to render
+                    for file_path in sorted(file_to_urls.keys()):
+                        if file_path in rendered_files:
+                            continue
                         
-                        is_skipped = (u in checked_globally)
-                        checked_globally.add(u)
+                        f_urls = sorted(file_to_urls[file_path])
+                        urls_in_file = [u for u in f_urls if u in url_to_future]
                         
-                        if ok:
-                            color = "info" if is_skipped else "success"
-                            icon = "✓"
-                            lbl = "skipped" if is_skipped else "OK"
-                        else:
-                            color = "warning" if any(kw in message.lower() for kw in self.infra_keywords) else "error"
-                            icon = "⚠" if color == "warning" else "✗"
-                            lbl = message
-
-                        link_indent = "  " * (len(dir_parts) + 1)
-                        branch = "├──" if i < f_total - 1 else "└──"
+                        # Check if all URLs in this file have completed
+                        if not all(u in file_results[file_path] for u in urls_in_file):
+                            continue
                         
-                        if HAS_RICH:
-                            t = Table(show_header=False, box=None, padding=0, expand=True)
-                            t.add_column("link", ratio=5)
-                            t.add_column("status", ratio=2, justify="right")
-                            t.add_row(f"{link_indent}{branch} [{color}]{icon}[/] [link]{u}[/]", f"[{color}]{lbl}[/]")
-                            _console.print(t)
-
-                    stat_color = "success" if f_ok == f_total else "error"
-                    icon_file = "✓" if f_ok == f_total else "✗"
-                    _console.print(f"{file_indent}  [{stat_color}][{f_ok}/{f_total} {icon_file}][/]\n")
-                    if aborted: break
+                        # All URLs for this file are done—render it now
+                        rendered_files.add(file_path)
+                        
+                        parts = file_path.split('/')
+                        dir_parts = parts[:-1]
+                        file_name = parts[-1]
+                        
+                        # Print directory headers if needed
+                        common_depth = 0
+                        for i in range(min(len(dir_parts), len(last_dir_parts))):
+                            if dir_parts[i] == last_dir_parts[i]:
+                                common_depth += 1
+                            else:
+                                break
+                        
+                        for i in range(common_depth, len(dir_parts)):
+                            indent = "  " * i
+                            _console.print(f"{indent}[dir]{dir_parts[i]}/[/]")
+                        
+                        last_dir_parts = dir_parts
+                        file_indent = "  " * len(dir_parts)
+                        
+                        # Print file header and all its results
+                        _console.print(f"{file_indent}[file]{file_name}[/]")
+                        
+                        f_total = len(urls_in_file)
+                        f_ok = 0
+                        
+                        for i, u in enumerate(urls_in_file):
+                            ok, message, elapsed = file_results[file_path][u]
+                            if ok:
+                                f_ok += 1
+                            
+                            is_skipped = (u in checked_globally)
+                            checked_globally.add(u)
+                            
+                            if ok:
+                                color = "info" if is_skipped else "success"
+                                icon = "✓"
+                                lbl = "skipped" if is_skipped else "OK"
+                            else:
+                                color = "warning" if any(kw in message.lower() for kw in self.infra_keywords) else "error"
+                                icon = "⚠" if color == "warning" else "✗"
+                                lbl = message
+                            
+                            link_indent = "  " * (len(dir_parts) + 1)
+                            branch = "├──" if i < f_total - 1 else "└──"
+                            
+                            if HAS_RICH:
+                                t = Table(show_header=False, box=None, padding=0, expand=True)
+                                t.add_column("link", ratio=5)
+                                t.add_column("status", ratio=2, justify="right")
+                                t.add_row(f"{link_indent}{branch} [{color}]{icon}[/] [link]{u}[/]", f"[{color}]{lbl}[/]")
+                                _console.print(t)
+                        
+                        stat_color = "success" if f_ok == f_total else "error"
+                        icon_file = "✓" if f_ok == f_total else "✗"
+                        _console.print(f"{file_indent}  [{stat_color}][{f_ok}/{f_total} {icon_file}][/]\n")
+                    
+                    if aborted:
+                        break
             finally:
                 if aborted:
                     executor.shutdown(cancel_futures=True)
@@ -217,7 +269,7 @@ class LinkCheckerRunner:
 
         if aborted:
             print("\nLinkcheck aborted due to max runtime; results are partial.")
-        
+
         summarize(self.failures, url_map, self.args.build_dir, global_start_time, len(file_to_urls))
         return aborted
 
@@ -231,7 +283,7 @@ def main() -> int:
     cache_dir = Path(args.cache_dir)
 
     ignore_urls, exclude_patterns, config_timeout, config_max_retries = load_config(args.conf)
-    
+
     # CLI args take priority over config, which takes priority over hardcoded defaults
     if args.timeout is None:
         args.timeout = config_timeout
@@ -251,7 +303,7 @@ def main() -> int:
 
     # Filter out ignored URLs
     urls = sorted([u for u in url_map.keys() if not should_ignore_url(u, ignore_urls)])
-    
+
     if args.max_urls and args.max_urls > 0:
         if len(urls) > args.max_urls:
             print(f"Limiting linkcheck to {args.max_urls} URLs out of {len(urls)}.")
@@ -268,12 +320,12 @@ def main() -> int:
     file_to_urls = map_files_to_urls(url_to_files)
 
     print_header(len(urls))
-    
+
     # Sort URLs by their first associated file path to improve tree grouping
     urls.sort(key=lambda u: url_to_files.get(u, [""])[0])
 
     runner = LinkCheckerRunner(args)
-    aborted = runner.run(urls, url_map, file_to_urls)
+    aborted = runner.run(urls, url_map, file_to_urls, url_to_files)
 
     if runner.failures:
         write_failures(cache_dir, runner.failures, url_map)

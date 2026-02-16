@@ -13,13 +13,13 @@ A fast, parallel link checker for Sphinx documentation projects.
 
 ## Features
 
-- **Parallel checking** with configurable workers
+- **Responsive parallel checking** - processes results as they complete, not blocked by slow URLs
 - **Smart caching** - recheck only failed links with `--fails-only`
-- **Beautiful output** with Rich library for terminal colors and formatting
-- **Source mapping** - traces broken links back to `.md`/`.rst` files
+- **Beautiful output** with Rich library for terminal colors and hierarchical formatting
+- **Source mapping** - traces broken links back to `.md`/`.rst` files with line numbers
 - **Rate limiting** per host to avoid overwhelming servers
-- **Automatic retries** with exponential backoff
-- **AST-based config** - safely reads `conf.py` without executing it
+- **Intelligent retries** - connection timeouts fail fast (host is unreachable), while HTTP 429/5xx get exponential backoff
+- **Config file support** - reads `linkcheck_timeout`, `linkcheck_retries`, `linkcheck_ignore` from `conf.py` via safe AST parsing
 
 ## Installation
 
@@ -49,12 +49,26 @@ The tool automatically reads settings from your Sphinx `conf.py`:
 
 ```python
 # conf.py
+linkcheck_timeout = 12          # Request timeout in seconds (default: 12)
+linkcheck_retries = 2           # Max retries for HTTP 429/5xx errors (default: 2)
 linkcheck_ignore = [
     'https://localhost:*',
     'https://internal.company.com/*'
 ]
 
 exclude_patterns = ['_build', '.sphinx']
+```
+
+### Retry Behavior
+
+- **Connection timeouts** (host unreachable) → fail fast immediately
+- **HTTP 429** (rate limited) or **5xx** errors → retry with exponential backoff
+- **HTTP 404** (not found) → fail immediately, no retry
+
+CLI arguments override `conf.py` settings:
+
+```bash
+linkcheck --timeout 15 --max-retries 3
 ```
 
 ## Sample Output
