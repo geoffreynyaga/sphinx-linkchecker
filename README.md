@@ -1,7 +1,7 @@
 # sphinx-linkchecker
 
 ```
-██╗     ██╗███╗   ██╗██╗  ██╗ ██████╗██╗  ██╗███████╗ ██████╗██╗  ██╗███████╗██████╗ 
+██╗     ██╗███╗   ██╗██╗  ██╗ ██████╗██╗  ██╗███████╗ ██████╗██╗  ██╗███████╗██████╗
 ██║     ██║████╗  ██║██║ ██╔╝██╔════╝██║  ██║██╔════╝██╔════╝██║ ██╔╝██╔════╝██╔══██╗
 ██║     ██║██╔██╗ ██║█████╔╝ ██║     ███████║█████╗  ██║     █████╔╝ █████╗  ██████╔╝
 ██║     ██║██║╚██╗██║██╔═██╗ ██║     ██╔══██║██╔══╝  ██║     ██╔═██╗ ██╔══╝  ██╔══██╗
@@ -13,6 +13,7 @@ A fast, parallel link checker for Sphinx documentation projects.
 
 ## Features
 
+- **Inline broken link reporting** - see failures immediately as they occur (no waiting for batched results)
 - **Responsive parallel checking** - processes results as they complete, not blocked by slow URLs
 - **Smart caching** - recheck only failed links with `--fails-only`
 - **Beautiful output** with Rich library for terminal colors and hierarchical formatting
