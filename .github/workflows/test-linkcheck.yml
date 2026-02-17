@@ -49,18 +49,23 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Add linkchecker target to Makefile
+      - name: Add html-for-linkcheck and linkchecker targets to Makefile
         run: |
           cd ubuntu-server-docs/docs
-          # Add a new linkchecker target that uses our custom tool
-          cat >> Makefile << 'EOF'
-
-          # Custom linkchecker using sphinx-linkchecker tool
-          LINKCHECK_CACHE = .sphinx/linkcheck
-          linkchecker: html
-          	@. $(VENV); $(VENVDIR)/bin/linkcheck --build-dir "$(BUILDDIR)" --cache-dir "$(LINKCHECK_CACHE)" $(if $(FAILS_ONLY),--fails-only,) $(LINKCHECK_ARGS)
-          	@echo "Note: Use 'make linkchecker FAILS_ONLY=1' to recheck only the previous failures."
-          EOF
+          # Add html-for-linkcheck target (builds HTML without strict warning mode)
+          # and linkchecker target (runs custom sphinx-linkchecker tool via PYTHONPATH)
+          {
+            echo ""
+            echo "# Build HTML for linkcheck (without strict warnings) - generates doctrees for linkchecker to use"
+            echo "html-for-linkcheck: install"
+            printf '\t. $(VENV); $(SPHINXBUILD) --keep-going -b dirhtml "$(SOURCEDIR)" "$(BUILDDIR)" -w $(SPHINXDIR)/warnings.txt $(SPHINXOPTS)\n'
+            echo ""
+            echo "# Custom linkchecker using sphinx-linkchecker tool"
+            echo "LINKCHECK_CACHE = .sphinx/linkcheck"
+            echo "linkchecker: html-for-linkcheck"
+            printf '\t@. $(VENV); $(VENVDIR)/bin/python -m linkchecker.main --build-dir "$(BUILDDIR)" --cache-dir "$(LINKCHECK_CACHE)" $(if $(FAILS_ONLY),--fails-only,) $(LINKCHECK_ARGS)\n'
+            printf '\t@echo "Note: Use '\''make linkchecker FAILS_ONLY=1'\'' to recheck only the previous failures."\n'
+          } >> Makefile
 
       - name: Run linkchecker with sphinx-linkchecker
         id: linkcheck

@@ -36,11 +36,12 @@ if HAS_RICH:
 else:
     _console = None
 
-def print_header(total_urls: int):
+def print_header(total_urls: int, workers: int = 6):
     """Print the tool header banner.
 
     Args:
         total_urls: Number of URLs to check.
+        workers: Number of worker threads to use.
     """
     with _print_lock:
         if HAS_RICH:
@@ -57,7 +58,7 @@ def print_header(total_urls: int):
                 box=DOUBLE,
                 expand=False,
                 border_style="title",
-                subtitle="Scanning documentation for broken links...",
+                subtitle=f"Checking {total_urls} URLs with {workers} workers...",
                 subtitle_align="center",
                 padding=(1, 2),
             )
@@ -70,7 +71,7 @@ def print_header(total_urls: int):
             _console.print("  --help                         Show this message and exit")
             _console.print()
         else:
-            print(f"Starting linkcheck for {total_urls} URLs...")
+            print(f"Starting linkcheck for {total_urls} URLs with {workers} workers...")
             print("Checked links:")
 
 def summarize(failures: Dict[str, str], url_map: Dict[str, List[Tuple[str, int]]], build_dir: str, start_time: float, files_scanned: int):

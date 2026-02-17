@@ -1,6 +1,7 @@
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
 from .utils import should_exclude_path
 
 class LinkParser(HTMLParser):
@@ -56,14 +57,34 @@ def find_links(build_dir: str, exclude_patterns: List[str]) -> Dict[str, List[Tu
             }
     """
     url_map: Dict[str, List[Tuple[str, int]]] = {}
-    for html_path in Path(build_dir).rglob("*.html"):
+    html_files = list(Path(build_dir).rglob("*.html"))
+    
+    # Filter excluded files
+    valid_files = []
+    for html_path in html_files:
         rel_path = str(html_path.relative_to(build_dir))
-        if should_exclude_path(rel_path, exclude_patterns):
-            continue
+        if not should_exclude_path(rel_path, exclude_patterns):
+            valid_files.append((html_path, rel_path))
+    
+    # Parallel file reading with ThreadPoolExecutor
+    def process_file(file_data):
+        html_path, rel_path = file_data
         try:
             content = html_path.read_text(encoding="utf-8", errors="ignore")
+            local_map: Dict[str, List[Tuple[str, int]]] = {}
+            parser = LinkParser(rel_path, local_map)
+            parser.feed(content)
+            return local_map
         except OSError:
-            continue
-        parser = LinkParser(rel_path, url_map)
-        parser.feed(content)
+            return {}
+    
+    # Process up to 10 files concurrently to speed up I/O
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = executor.map(process_file, valid_files)
+    
+    # Merge results
+    for local_map in results:
+        for url, locations in local_map.items():
+            url_map.setdefault(url, []).extend(locations)
+    
     return url_map

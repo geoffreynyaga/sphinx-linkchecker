@@ -1,9 +1,10 @@
 import threading
 import time
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 from urllib.parse import urlparse
 import requests
 from .colors import color_blue, _print_lock
+from .domain_failures import FailedDomainTracker
 
 _session_local = threading.local()
 
@@ -117,6 +118,7 @@ def check_url(
     timeout: float,
     rate_limiter: RateLimiter,
     max_retries: int,
+    domain_tracker: Optional[FailedDomainTracker] = None,
 ) -> Tuple[bool, str, float]:
     """Check a single URL for validity.
 
@@ -149,6 +151,11 @@ def check_url(
         ✓ Link OK: HTTP 200 (0.45s)
     """
     host = urlparse(url).netloc
+    
+    # Skip if domain is already marked as failed
+    if domain_tracker and domain_tracker.is_domain_failed(url):
+        return True, "skipped (domain failed)", 0.0
+    
     session = get_session()
     start_time = time.monotonic()
     for attempt in range(max_retries + 1):
@@ -168,12 +175,19 @@ def check_url(
                     time.sleep(sleep_time)
                     continue
                 suffix = " (rate limited)" if response.status_code == 429 else ""
+                if domain_tracker:
+                    domain_tracker.mark_failure(url, f"HTTP {response.status_code}")
                 return False, f"HTTP {response.status_code}{suffix}", elapsed
+            # Success
+            if domain_tracker:
+                domain_tracker.mark_success(url)
             return True, f"HTTP {response.status_code}", elapsed
         except requests.RequestException as exc:
             # Fail fast on connection timeouts—host is unreachable, retries won't help.
             if _is_connection_timeout(exc):
                 elapsed = time.monotonic() - start_time
+                if domain_tracker:
+                    domain_tracker.mark_failure(url, "connection timeout")
                 return False, str(exc).splitlines()[0], elapsed
             # Other transient errors (read timeout, DNS failure) may benefit from retries.
             if attempt < max_retries:
@@ -181,4 +195,6 @@ def check_url(
                 time.sleep(sleep_time)
                 continue
             elapsed = time.monotonic() - start_time
+            if domain_tracker:
+                domain_tracker.mark_failure(url, str(exc))
             return False, str(exc).splitlines()[0], elapsed
