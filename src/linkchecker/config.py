@@ -38,8 +38,8 @@ def load_config(conf_path: str) -> Tuple[List[str], List[str], float, int]:
     """
     ignore_urls = []
     exclude_patterns = []
-    timeout = 12.0  # default
-    max_retries = 2  # default
+    timeout = 10.0  # default (reduced from 12s for faster checks)
+    max_retries = 1  # default (reduced from 2 for faster failure handling)
 
     if not os.path.exists(conf_path):
         return ignore_urls, exclude_patterns, timeout, max_retries

@@ -12,7 +12,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Optional
+from collections import deque
 
 from .colors import HAS_RICH, _print_lock
 from .utils import (
@@ -25,9 +26,85 @@ from .doctree_crawler import extract_links_with_fallback
 from .cache import load_failed, write_failures
 from .reporter import summarize, _console, print_header
 from .domain_failures import FailedDomainTracker
+from .response_cache import ResponseCache
 
 if HAS_RICH:
     pass  # Rich is available but we don't need Table anymore for simple rendering
+
+
+class BatchedOutputBuffer:
+    """Batches console output to reduce mutex contention.
+
+    Instead of calling _print_lock for every URL result, accumulate results
+    in a buffer and flush them periodically (or when buffer exceeds a size).
+    This significantly reduces lock contention when checking hundreds of URLs.
+    """
+
+    def __init__(self, batch_size: int = 50, flush_interval_ms: int = 100):
+        """Initialize the output buffer.
+
+        Args:
+            batch_size: Number of results to accumulate before flushing.
+            flush_interval_ms: Maximum milliseconds between flushes.
+        """
+        self.batch_size = batch_size
+        self.flush_interval_ms = flush_interval_ms / 1000.0
+        self._buffer: deque = deque()
+        self._lock = threading.Lock()
+        self._last_flush = time.monotonic()
+        self._stop = False
+
+        # Start background flush thread
+        self._flush_thread = threading.Thread(target=self._auto_flush_worker, daemon=True)
+        self._flush_thread.start()
+
+    def add(self, text: str) -> None:
+        """Add text to the output buffer.
+
+        Args:
+            text: The text to buffer.
+        """
+        with self._lock:
+            self._buffer.append(text)
+            if len(self._buffer) >= self.batch_size:
+                self._flush_unlocked()
+
+    def _flush_unlocked(self) -> None:
+        """Flush buffered output (must be called with lock held)."""
+        if not self._buffer:
+            return
+
+        # Acquire print lock and output all buffered items at once
+        with _print_lock:
+            while self._buffer:
+                text = self._buffer.popleft()
+                if HAS_RICH:
+                    _console.print(text, soft_wrap=True)
+                else:
+                    print(text)
+
+        self._last_flush = time.monotonic()
+
+    def _auto_flush_worker(self) -> None:
+        """Background thread that flushes periodically."""
+        while not self._stop:
+            time.sleep(self.flush_interval_ms)
+            with self._lock:
+                now = time.monotonic()
+                if now - self._last_flush >= self.flush_interval_ms and self._buffer:
+                    self._flush_unlocked()
+
+    def flush(self) -> None:
+        """Flush all buffered output immediately."""
+        with self._lock:
+            self._flush_unlocked()
+
+    def close(self) -> None:
+        """Flush and stop the background thread."""
+        self._stop = True
+        self.flush()
+        self._flush_thread.join(timeout=1.0)
+
 
 def _auto_scale_workers() -> int:
     """Auto-scale worker count based on CPU availability.
@@ -49,8 +126,8 @@ def parse_args():
     parser.add_argument("--cache-dir", default=".sphinx/linkcheck")
     parser.add_argument("--fails-only", action="store_true")
     parser.add_argument("--timeout", type=float, default=None)
-    parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--per-host-delay", type=float, default=0.5)
+    parser.add_argument("--workers", type=int, default=6)  # Reduced from auto-scale for less contention
+    parser.add_argument("--per-host-delay", type=float, default=0.3)  # Reduced from 0.5s for faster throughput
     parser.add_argument("--max-retries", type=int, default=None)
     parser.add_argument("--max-urls", type=int, default=0)
     parser.add_argument("--max-seconds", type=int, default=0)
@@ -59,9 +136,6 @@ def parse_args():
     parser.add_argument("--skip-failed-domains", action="store_true", default=True)
     parser.add_argument("--conf", default="conf.py")
     args = parser.parse_args()
-    # Auto-scale workers if not explicitly provided
-    if args.workers is None:
-        args.workers = _auto_scale_workers()
     return args
 
 class LinkCheckerRunner:
@@ -79,12 +153,16 @@ class LinkCheckerRunner:
         db_checked (int): Total number of URLs checked.
         db_success (int): Total number of successful checks.
         db_fail (int): Total number of failed checks.
+        response_cache (ResponseCache): In-memory + persistent response cache.
+        output_buffer (BatchedOutputBuffer): Batches console output to reduce mutex contention.
     """
-    def __init__(self, args):
+    def __init__(self, args, response_cache: Optional[ResponseCache] = None, output_buffer: Optional[BatchedOutputBuffer] = None):
         """Initialize the runner with arguments.
 
         Args:
             args (argparse.Namespace): The parsed CLI arguments.
+            response_cache (Optional[ResponseCache]): Response cache instance.
+            output_buffer (Optional[BatchedOutputBuffer]): Output buffer for batching.
         """
         self.args = args
         self.infra_keywords = ["timeout", "connection", "ssl", "403", "500", "502", "503", "504", "reset"]
@@ -96,6 +174,8 @@ class LinkCheckerRunner:
         self.db_success = 0
         self.db_fail = 0
         self.domain_tracker = FailedDomainTracker(failure_threshold=3)
+        self.response_cache = response_cache
+        self.output_buffer = output_buffer or BatchedOutputBuffer(batch_size=50, flush_interval_ms=100)
 
     def on_future_done(self, future):
         """Callback for when a check_url future completes.
@@ -137,31 +217,30 @@ class LinkCheckerRunner:
                 _console.print(f"({file_path}: [warning]broken[/])  [link]{url}[/] - [error]{message}[/]", soft_wrap=True)
 
     def report_link_result(self, url: str, ok: bool, message: str, elapsed: float) -> None:
-        """Print a single URL check result immediately in completion order."""
+        """Add a single URL check result to the output buffer (batched)."""
         status = message
         elapsed_ms = int(elapsed * 1000)
 
         if HAS_RICH:
-            with _print_lock:
-                if not ok:
-                    _console.print(f"[error]✗[/] [link]{url}[/] [error]{status}[/] ({elapsed_ms}ms)", soft_wrap=True)
-                elif "skipped" in status.lower():
-                    _console.print(f"[info]•[/] [link]{url}[/] [info]{status}[/]", soft_wrap=True)
-                else:
-                    _console.print(f"[success]✓[/] [link]{url}[/] [success]{status}[/] ({elapsed_ms}ms)", soft_wrap=True)
+            if not ok:
+                text = f"[error]✗[/] [link]{url}[/] [error]{status}[/] ({elapsed_ms}ms)"
+            elif "skipped" in status.lower():
+                text = f"[info]•[/] [link]{url}[/] [info]{status}[/]"
+            else:
+                text = f"[success]✓[/] [link]{url}[/] [success]{status}[/] ({elapsed_ms}ms)"
         else:
             prefix = "[FAIL]" if not ok else ("[SKIP]" if "skipped" in status.lower() else "[ OK ]")
-            with _print_lock:
-                if "skipped" in status.lower():
-                    print(f"{prefix} {url} - {status}")
-                else:
-                    print(f"{prefix} {url} - {status} ({elapsed_ms}ms)")
+            if "skipped" in status.lower():
+                text = f"{prefix} {url} - {status}"
+            else:
+                text = f"{prefix} {url} - {status} ({elapsed_ms}ms)"
+
+        self.output_buffer.add(text)
 
     def run(self, urls: List[str], url_map: Dict[str, List[Tuple[str, int]]], url_to_files: Dict[str, List[str]]):
         """Execute the link check for the provided URLs.
 
-        Processes URLs in parallel and prints results as they complete (no batching).
-        Maximum speed: renders each link immediately without waiting for file grouping.
+        Processes URLs in parallel and prints results in batched flushes to reduce lock contention.
 
         Args:
             urls (List[str]): List of unique URLs to check.
@@ -193,17 +272,24 @@ class LinkCheckerRunner:
         with ThreadPoolExecutor(max_workers=self.args.workers) as executor:
             url_to_future = {}
             for url in urls:
-                f = executor.submit(check_url, url, self.args.timeout, rate_limiter, self.args.max_retries, self.domain_tracker)
+                f = executor.submit(
+                    check_url,
+                    url,
+                    self.args.timeout,
+                    rate_limiter,
+                    self.args.max_retries,
+                    self.domain_tracker,
+                    self.response_cache,
+                )
                 f.add_done_callback(self.on_future_done)
                 url_to_future[url] = f
 
             # Calculate worker timeout: must accommodate all retries plus exponential backoff.
-            # With max_retries=2 and timeout=12s:
-            #   Attempt 1: 12s + backoff(2^0=1s) = 13s
-            #   Attempt 2: 12s + backoff(2^1=2s) = 14s
-            #   Attempt 3: 12s + backoff(2^2=4s) = 16s
-            #   Total: ~43s + rate limiter delays + safety margin
-            worker_timeout = (self.args.timeout * (self.args.max_retries + 1)) + 30
+            # With max_retries=1 and timeout=10s:
+            #   Attempt 1: 10s + backoff(2^0=1s) = 11s
+            #   Attempt 2: 10s + backoff(2^1=2s) = 12s
+            #   Total: ~23s + rate limiter delays + safety margin
+            worker_timeout = (self.args.timeout * (self.args.max_retries + 1)) + 20
 
             try:
                 # Process results as they complete (not in file order) for responsive UI.
@@ -248,6 +334,8 @@ class LinkCheckerRunner:
                 stop_progress.set()
                 if progress_thread:
                     progress_thread.join(timeout=1.0)
+                # Ensure all buffered results are printed before summary.
+                self.output_buffer.flush()
 
         if aborted:
             print("\nLinkcheck aborted due to max runtime; results are partial.")
@@ -255,6 +343,9 @@ class LinkCheckerRunner:
         # Count unique files scanned
         files_scanned = len(set(f for locs in url_map.values() for f, _ in locs))
         summarize(self.failures, url_map, self.args.build_dir, global_start_time, files_scanned)
+        self.output_buffer.close()
+        if self.response_cache:
+            self.response_cache.persist()
         return aborted
 
 def main() -> int:
@@ -310,8 +401,11 @@ def main() -> int:
 
     print_header(len(urls), args.workers)
 
+    response_cache = ResponseCache(cache_dir / "response-cache.json", max_age_seconds=3600)
+    output_buffer = BatchedOutputBuffer(batch_size=50, flush_interval_ms=100)
+
     # No need to sort for tree grouping - we're rendering as we go
-    runner = LinkCheckerRunner(args)
+    runner = LinkCheckerRunner(args, response_cache=response_cache, output_buffer=output_buffer)
     aborted = runner.run(urls, filtered_url_map, url_to_files)
 
     if runner.failures:
