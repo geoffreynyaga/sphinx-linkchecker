@@ -1,0 +1,81 @@
+name: Test Link Checker on Ubuntu Server Docs
+
+on:
+  push:
+    branches:
+      - '**'  # Run on all branches
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  test-linkcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout sphinx-linkchecker repository
+        uses: actions/checkout@v4
+        with:
+          path: sphinx-linkchecker
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Clone Ubuntu Server Documentation
+        run: |
+          git clone --depth 1 https://github.com/canonical/ubuntu-server-documentation.git ubuntu-server-docs
+      
+      - name: Install sphinx-linkchecker from this repo
+        run: |
+          cd sphinx-linkchecker
+          pip install -e .
+      
+      - name: Add sphinx-linkchecker to ubuntu-server-docs requirements
+        run: |
+          cd ubuntu-server-docs/docs
+          echo "" >> requirements.txt
+          echo "# Link checker from sphinx-linkchecker repo" >> requirements.txt
+          echo "sphinx-linkchecker @ git+https://github.com/${{ github.repository }}@${{ github.sha }}" >> requirements.txt
+      
+      - name: Install documentation dependencies
+        run: |
+          cd ubuntu-server-docs/docs
+          python3 -m venv .sphinx/venv
+          . .sphinx/venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run linkcheck with sphinx-linkchecker
+        id: linkcheck
+        run: |
+          cd ubuntu-server-docs/docs
+          # Use make linkcheck which builds HTML first and passes conf.py settings
+          make linkcheck LINKCHECK_ARGS="--workers 10 --timeout 15"
+        continue-on-error: true  # Don't fail the workflow on broken links
+      
+      - name: Upload linkcheck results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkcheck-results
+          path: |
+            ubuntu-server-docs/docs/.sphinx/linkcheck/
+            ubuntu-server-docs/docs/_build/
+          retention-days: 7
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Link Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f ubuntu-server-docs/docs/.sphinx/linkcheck/failures.json ]; then
+            echo "⚠️ Some links failed validation. Check the artifacts for details." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ All links validated successfully!" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Artifacts:** linkcheck-results contains the full report and cache." >> $GITHUB_STEP_SUMMARY
