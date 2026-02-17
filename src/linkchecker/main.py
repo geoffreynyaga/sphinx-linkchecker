@@ -165,8 +165,22 @@ class LinkCheckerRunner:
             output_buffer (Optional[BatchedOutputBuffer]): Output buffer for batching.
         """
         self.args = args
-        self.infra_keywords = ["timeout", "connection", "ssl", "403", "500", "502", "503", "504", "reset"]
+        self.infra_keywords = [
+            "timeout",
+            "connection",
+            "ssl",
+            "403",
+            "429",
+            "rate limited",
+            "too many requests",
+            "500",
+            "502",
+            "503",
+            "504",
+            "reset",
+        ]
         self.failures: Dict[str, str] = {}
+        self.warnings: Dict[str, str] = {}
         self.results: Dict[str, Tuple[bool, str]] = {}
         self.checked_urls = 0
         self.db_lock = threading.Lock()
@@ -321,10 +335,14 @@ class LinkCheckerRunner:
 
                     # Record failures
                     if not ok:
-                        self.failures[url] = message
-                        # Report broken links inline
-                        source_files = url_to_files.get(url, [])
-                        self.report_broken_link(url, source_files, message)
+                        is_warning = any(kw in message.lower() for kw in self.infra_keywords)
+                        if is_warning:
+                            self.warnings[url] = message
+                        else:
+                            self.failures[url] = message
+                            # Report broken links inline
+                            source_files = url_to_files.get(url, [])
+                            self.report_broken_link(url, source_files, message)
 
                     if aborted:
                         break
@@ -342,7 +360,7 @@ class LinkCheckerRunner:
 
         # Count unique files scanned
         files_scanned = len(set(f for locs in url_map.values() for f, _ in locs))
-        summarize(self.failures, url_map, self.args.build_dir, global_start_time, files_scanned)
+        summarize(self.failures, url_map, self.args.build_dir, global_start_time, files_scanned, warnings=self.warnings)
         self.output_buffer.close()
         if self.response_cache:
             self.response_cache.persist()
@@ -411,6 +429,9 @@ def main() -> int:
     if runner.failures:
         write_failures(cache_dir, runner.failures, filtered_url_map)
         return 2 if aborted else 1
+
+    if runner.warnings:
+        return 2 if aborted else 2
 
     if cache_dir.exists():
         import shutil

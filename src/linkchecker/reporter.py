@@ -74,7 +74,14 @@ def print_header(total_urls: int, workers: int = 6):
             print(f"Starting linkcheck for {total_urls} URLs with {workers} workers...")
             print("Checked links:")
 
-def summarize(failures: Dict[str, str], url_map: Dict[str, List[Tuple[str, int]]], build_dir: str, start_time: float, files_scanned: int):
+def summarize(
+    failures: Dict[str, str],
+    url_map: Dict[str, List[Tuple[str, int]]],
+    build_dir: str,
+    start_time: float,
+    files_scanned: int,
+    warnings: Dict[str, str] = None,
+):
     """Print final summary report with broken links and statistics.
 
     Separates failures into hard errors (404s) and warnings (timeouts, rate limits).
@@ -91,15 +98,30 @@ def summarize(failures: Dict[str, str], url_map: Dict[str, List[Tuple[str, int]]
     total_links = len(url_map)
     broken_count = len(failures)
 
-    infra_keywords = ["timeout", "connection", "ssl", "403", "500", "502", "503", "504", "reset"]
-    warnings: Dict[str, str] = {}
-    final_failures: Dict[str, str] = {}
+    final_failures: Dict[str, str] = failures
+    if warnings is None:
+        infra_keywords = [
+            "timeout",
+            "connection",
+            "ssl",
+            "403",
+            "429",
+            "rate limited",
+            "too many requests",
+            "500",
+            "502",
+            "503",
+            "504",
+            "reset",
+        ]
+        warnings = {}
+        final_failures = {}
 
-    for url, err in failures.items():
-        if any(kw in err.lower() for kw in infra_keywords):
-            warnings[url] = err
-        else:
-            final_failures[url] = err
+        for url, err in failures.items():
+            if any(kw in err.lower() for kw in infra_keywords):
+                warnings[url] = err
+            else:
+                final_failures[url] = err
 
     warning_count = len(warnings)
     fail_count = len(final_failures)
@@ -172,7 +194,12 @@ def summarize(failures: Dict[str, str], url_map: Dict[str, List[Tuple[str, int]]
         console.print(f"  [subtitle]Files Scanned[/]     {files_scanned}")
         console.print(f"  [subtitle]Links Processed[/]   {total_links}")
 
-        status_text = "[warning]⚠ ISSUES FOUND[/]" if broken_count > 0 else "[success]PASS[/]"
+        if broken_count > 0:
+            status_text = "[warning]⚠ ISSUES FOUND[/]"
+        elif warning_count > 0:
+            status_text = "[warning]⚠ WARNINGS ONLY[/]"
+        else:
+            status_text = "[success]PASS[/]"
         console.print(f"  [subtitle]Status[/]            {status_text}")
         if fail_count > 0:
             console.print("\n  [error]Exit Code: 1 (broken links detected)[/]")

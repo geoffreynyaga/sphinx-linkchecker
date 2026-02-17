@@ -72,8 +72,14 @@ jobs:
         run: |
           cd ubuntu-server-docs/docs
           # Use make linkchecker which builds HTML first and passes conf.py settings
+          set +e
           make linkchecker LINKCHECK_ARGS="--workers 10 --timeout 15"
-        continue-on-error: true  # Don't fail the workflow on broken links
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "Linkcheck completed with warnings (rate limits/infra)."
+            exit 0
+          fi
+          exit "$status"
 
       - name: Upload linkcheck results
         if: always()
