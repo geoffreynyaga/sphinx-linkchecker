@@ -27,7 +27,7 @@ jobs:
 
       - name: Clone Ubuntu Server Documentation
         run: |
-          git clone --depth 1 https://github.com/canonical/ubuntu-server-documentation.git ubuntu-server-docs
+          git clone https://github.com/canonical/ubuntu-server-documentation.git ubuntu-server-docs
 
       - name: Install sphinx-linkchecker from this repo
         run: |
