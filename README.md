@@ -20,7 +20,7 @@ A fast, parallel link checker for Sphinx documentation projects.
 - **Source mapping** - traces broken links back to `.md`/`.rst` files with line numbers
 - **Rate limiting** per host to avoid overwhelming servers
 - **Intelligent retries** - connection timeouts fail fast (host is unreachable), while HTTP 429/5xx get exponential backoff
-- **Config file support** - reads `linkcheck_timeout`, `linkcheck_retries`, `linkcheck_ignore` from `conf.py` via safe AST parsing
+- **Config file support** - reads `linkcheck_timeout`, `linkcheck_retries`, `linkcheck_ignore` from `conf.py` via safe AST parsing.
 
 ## Installation
 
